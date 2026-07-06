@@ -39,6 +39,30 @@ app.get("/health", async () => makeHealth(SERVICE_NAME));
 
 app.get("/trust", async () => Array.from(trust.values()));
 
+// Unterhalb dieses Scores gilt eine Beziehung als "blockiert" / kein Kontakt.
+const MIN_TRUST_TO_INTERACT = 20;
+
+// Darf `fromUserId` mit `toUserId` interagieren (z.B. eine Teilnahme-Anfrage
+// stellen)? Standard: erlaubt, außer es existiert eine Trust-Kante mit zu
+// niedrigem Score.
+app.get<{ Querystring: { fromUserId?: string; toUserId?: string } }>(
+  "/can-interact",
+  async (req, reply) => {
+    const { fromUserId, toUserId } = req.query;
+    if (!fromUserId || !toUserId) {
+      return reply.code(400).send({ error: "fromUserId and toUserId are required" });
+    }
+    if (!isKnownUser(fromUserId) || !isKnownUser(toUserId)) {
+      return { fromUserId, toUserId, canInteract: false, reason: "UNKNOWN_USER" };
+    }
+    const edge = trust.get(key(fromUserId, toUserId));
+    if (edge && edge.score < MIN_TRUST_TO_INTERACT) {
+      return { fromUserId, toUserId, canInteract: false, reason: "LOW_TRUST" };
+    }
+    return { fromUserId, toUserId, canInteract: true, reason: null };
+  },
+);
+
 // Outgoing trust edges for a user plus the average trust others place in them.
 app.get<{ Params: { userId: string } }>("/trust/:userId", async (req) => {
   const { userId } = req.params;

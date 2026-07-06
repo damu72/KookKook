@@ -57,6 +57,22 @@ npm run typecheck
 In `@kookkook/shared` definiert und von allen Services genutzt:
 `anna`, `ben`, `clara`, `david`.
 
+## Frontend (5173)
+
+Vite + React, State-basierter Router (keine Router-Dependency), Demo-User-Umschalter
+oben rechts (in `localStorage` gemerkt, keine Auth). Screens:
+
+- **Entdecken** – Liste offener (veröffentlichter) Kochabende.
+- **Topic Detail** – öffentliche Details + Button „Teilnahme anfragen".
+- **Kochabend anlegen** – Formular; legt Topic **und** Kapazität an, damit der
+  Flow (anfragen → akzeptieren → Platz reservieren) sofort funktioniert.
+- **Host-Dashboard** – Gastgeber sieht Anfragen seiner Abende, akzeptiert/lehnt ab.
+- **Meine Anfragen** – Gast sieht eigene Anfragen mit Status, kann zurückziehen.
+- **Confirmed View** – bestätigte Gäste sehen private Adresse & Ankunfts-Hinweis
+  (via `private-view` des Topic Service).
+
+Bewusst **ohne** Likes, Follower oder Feed.
+
 ## Services & Endpunkte
 
 Jeder Service hat einen `GET /health`-Endpunkt.
@@ -88,10 +104,36 @@ Ein Topic hat: `id`, `hostUserId`, `title`, `description`, `cuisine`,
   konfigurierbar.
 
 ### participation-service (3002)
+
+Verwaltet Teilnahme-Anfragen als Zustandsmaschine:
+
+```
+REQUESTED --accept--> ACCEPTED   (Host; Platz im Capacity Service reserviert)
+REQUESTED --decline--> DECLINED  (Host)
+REQUESTED --cancel--> CANCELLED  (Gast)
+ACCEPTED  --cancel--> CANCELLED  (Gast; Reservierung wird freigegeben)
+```
+
 - `GET /health`
-- `GET /participations?topicId=&userId=`
-- `POST /participations` – `{ topicId, userId, status? }`
-- `DELETE /participations/:id`
+- `POST /participation-requests` – `{ topicId, guestUserId }` → Anfrage stellen
+- `GET /topics/:topicId/participation-requests` – Anfragen eines Topics
+- `GET /users/:userId/participation-requests` – Anfragen eines Gasts
+- `POST /participation-requests/:id/accept` – `{ actingUserId }` (nur Host)
+- `POST /participation-requests/:id/decline` – `{ actingUserId, reason? }` (nur Host)
+- `POST /participation-requests/:id/cancel` – `{ actingUserId }` (nur Gast)
+
+**Regeln:**
+- Ein Gast darf pro Topic nur **eine aktive** Anfrage haben (aktiv = REQUESTED/ACCEPTED) → sonst `409`.
+- Beim **Erstellen** wird der Trust Service (`can-interact`) geprüft; verweigert er, `403`.
+  Der Trust-Check ist Pflicht – ist der Service nicht erreichbar, wird **nicht** erstellt (`502`).
+- Nur der **Host** des Topics (aus dem Topic Service ermittelt) darf accept/decline; nur der **Gast** darf cancel → sonst `403`.
+- Beim **Akzeptieren** reserviert der Capacity Service einen Platz. Ist kein Platz frei,
+  **bleibt die Anfrage REQUESTED** und die Antwort ist `409` mit `reason: "NO_SEATS_AVAILABLE"`.
+- Die Reservierung nutzt die Request-ID als **Idempotenz-Schlüssel**, sodass ein Retry bei
+  transientem Verbindungsfehler keinen zweiten Platz belegt.
+
+Cross-Service-URLs sind über `TOPIC_SERVICE_URL`, `TRUST_SERVICE_URL`,
+`CAPACITY_SERVICE_URL` konfigurierbar.
 
 ### capacity-service (3003)
 
@@ -100,8 +142,10 @@ Verwaltet pro Topic eine Kapazität (`maxGuests`) und die Sitzplatz-Reservierung
 - `GET /health`
 - `POST /capacities` – `{ topicId, maxGuests }` (409 wenn bereits vorhanden)
 - `GET /capacities/:topicId` – `{ topicId, maxGuests, reservedSeats, availableSeats }` (404 wenn nicht definiert)
-- `POST /seat-reservations` – `{ topicId, userId }` → legt eine Reservierung an.
+- `POST /seat-reservations` – `{ topicId, userId, idempotencyKey? }` → legt eine Reservierung an.
   `409`, wenn keine Plätze mehr frei sind; `404`, wenn keine Kapazität definiert ist.
+  Wird `idempotencyKey` mitgegeben und existiert dazu schon eine aktive Reservierung,
+  wird diese zurückgegeben (kein zweiter Platz) – macht Retries sicher.
 - `POST /seat-reservations/:reservationId/release` – gibt eine Reservierung frei (idempotent).
 
 **Invariante:** aktive Reservierungen ≤ `maxGuests` – auch bei gleichzeitigen
@@ -117,6 +161,9 @@ Später kann ein Postgres-Repository denselben Port erfüllen (Transaktion mit
 - `GET /trust` – alle Kanten
 - `GET /trust/:userId` – ausgehende/eingehende Kanten + Durchschnitt
 - `PUT /trust` – `{ fromUserId, toUserId, score }` (0–100)
+- `GET /can-interact?fromUserId=&toUserId=` – `{ canInteract, reason }`.
+  Standardmäßig erlaubt; `false` bei unbekanntem User (`UNKNOWN_USER`) oder zu
+  niedrigem Trust-Score (`LOW_TRUST`). Wird vom Participation Service genutzt.
 
 ## Hinweise
 

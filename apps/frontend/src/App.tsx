@@ -1,80 +1,95 @@
-import { useEffect, useState } from "react";
-import { SERVICES, ServiceKey, getJson } from "./services.js";
+import { useState } from "react";
+import { DEMO_USERS, useCurrentUser } from "./users.js";
+import { Discover } from "./screens/Discover.js";
+import { TopicDetail } from "./screens/TopicDetail.js";
+import { CreateTopic } from "./screens/CreateTopic.js";
+import { HostDashboard } from "./screens/HostDashboard.js";
+import { MyParticipations } from "./screens/MyParticipations.js";
+import { ConfirmedView } from "./screens/ConfirmedView.js";
 
-interface Health {
-  status: string;
-  service: string;
-  uptime: number;
-}
+export type View =
+  | { name: "discover" }
+  | { name: "topic"; topicId: string }
+  | { name: "create" }
+  | { name: "host" }
+  | { name: "mine" }
+  | { name: "confirmed"; topicId: string };
 
-interface Topic {
-  id: string;
-  title: string;
-  description: string;
-  createdBy: string;
-}
+export type Navigate = (view: View) => void;
 
-interface User {
-  id: string;
-  displayName: string;
-}
-
-function useHealth() {
-  const [health, setHealth] = useState<Record<string, string>>({});
-  useEffect(() => {
-    (Object.entries(SERVICES) as [ServiceKey, string][]).forEach(([key, base]) => {
-      getJson<Health>(base, "/health")
-        .then((h) => setHealth((prev) => ({ ...prev, [key]: h.status })))
-        .catch(() => setHealth((prev) => ({ ...prev, [key]: "down" })));
-    });
-  }, []);
-  return health;
-}
+const NAV_ITEMS: Array<{ label: string; view: View }> = [
+  { label: "Entdecken", view: { name: "discover" } },
+  { label: "Kochabend anlegen", view: { name: "create" } },
+  { label: "Host-Dashboard", view: { name: "host" } },
+  { label: "Meine Anfragen", view: { name: "mine" } },
+];
 
 export function App() {
-  const health = useHealth();
-  const [topics, setTopics] = useState<Topic[]>([]);
-  const [users, setUsers] = useState<User[]>([]);
-
-  useEffect(() => {
-    getJson<Topic[]>(SERVICES.topic, "/topics").then(setTopics).catch(() => {});
-    getJson<User[]>(SERVICES.topic, "/users").then(setUsers).catch(() => {});
-  }, []);
+  const [view, setView] = useState<View>({ name: "discover" });
+  const [currentUser, setCurrentUser] = useCurrentUser();
+  const navigate: Navigate = (v) => setView(v);
 
   return (
-    <main style={{ fontFamily: "system-ui, sans-serif", maxWidth: 720, margin: "2rem auto", padding: "0 1rem" }}>
-      <h1>🍳 KookKook</h1>
-
-      <section>
-        <h2>Services</h2>
-        <ul>
-          {Object.keys(SERVICES).map((key) => (
-            <li key={key}>
-              <strong>{key}</strong>: {health[key] ?? "…"}
-            </li>
+    <>
+      <header className="topbar">
+        <span className="brand" onClick={() => navigate({ name: "discover" })}>
+          🍳 KookKook
+        </span>
+        <nav className="nav">
+          {NAV_ITEMS.map((item) => (
+            <button
+              key={item.label}
+              className={item.view.name === view.name ? "active" : ""}
+              onClick={() => navigate(item.view)}
+            >
+              {item.label}
+            </button>
           ))}
-        </ul>
-      </section>
+        </nav>
+        <div className="userswitch">
+          <label htmlFor="user">Angemeldet als</label>
+          <select
+            id="user"
+            value={currentUser}
+            onChange={(e) => setCurrentUser(e.target.value)}
+          >
+            {DEMO_USERS.map((u) => (
+              <option key={u.id} value={u.id}>
+                {u.displayName}
+              </option>
+            ))}
+          </select>
+        </div>
+      </header>
 
-      <section>
-        <h2>Demo-User</h2>
-        <ul>
-          {users.map((u) => (
-            <li key={u.id}>{u.displayName}</li>
-          ))}
-        </ul>
-      </section>
-
-      <section>
-        <h2>Topics</h2>
-        <ul>
-          {topics.map((t) => (
-            <li key={t.id}>
-              <strong>{t.title}</strong> — {t.description} <em>(von {t.createdBy})</em>
-            </li>
-          ))}
-        </ul>
-      </section>
-    </main>
+      <main className="container">
+        <Screen view={view} navigate={navigate} currentUser={currentUser} />
+      </main>
+    </>
   );
+}
+
+function Screen({
+  view,
+  navigate,
+  currentUser,
+}: {
+  view: View;
+  navigate: Navigate;
+  currentUser: string;
+}) {
+  switch (view.name) {
+    case "discover":
+      return <Discover navigate={navigate} />;
+    case "topic":
+      return <TopicDetail topicId={view.topicId} navigate={navigate} currentUser={currentUser} />;
+    case "create":
+      return <CreateTopic navigate={navigate} currentUser={currentUser} />;
+    case "host":
+      return <HostDashboard navigate={navigate} currentUser={currentUser} />;
+    case "mine":
+      return <MyParticipations navigate={navigate} currentUser={currentUser} />;
+    case "confirmed":
+      return <ConfirmedView topicId={view.topicId} navigate={navigate} currentUser={currentUser} />;
+  }
 }

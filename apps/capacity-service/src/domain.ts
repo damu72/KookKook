@@ -26,6 +26,13 @@ export interface SeatReservation {
   topicId: string;
   userId: string;
   status: ReservationStatus;
+  /**
+   * Optionaler Idempotenz-Schlüssel des Aufrufers. Ein wiederholter
+   * reserveSeat mit demselben Schlüssel liefert dieselbe Reservierung, statt
+   * eine zweite anzulegen (macht Retries des nicht-idempotenten POST sicher).
+   * In Postgres entspräche das einem UNIQUE-Index auf diesem Schlüssel.
+   */
+  idempotencyKey: string | null;
   createdAt: string;
   releasedAt: string | null;
 }
@@ -68,8 +75,16 @@ export class ReservationNotFoundError extends Error {
 export interface CapacityRepository {
   createCapacity(topicId: string, maxGuests: number): Promise<CapacityView>;
   getCapacity(topicId: string): Promise<CapacityView>;
-  /** Reserviert atomar einen Platz oder wirft CapacityFull/CapacityNotFound. */
-  reserveSeat(topicId: string, userId: string): Promise<SeatReservation>;
+  /**
+   * Reserviert atomar einen Platz oder wirft CapacityFull/CapacityNotFound.
+   * Wird `idempotencyKey` übergeben und existiert dazu bereits eine aktive
+   * Reservierung, wird diese unverändert zurückgegeben.
+   */
+  reserveSeat(
+    topicId: string,
+    userId: string,
+    idempotencyKey?: string,
+  ): Promise<SeatReservation>;
   /** Gibt eine Reservierung frei (idempotent). */
   releaseReservation(reservationId: string): Promise<SeatReservation>;
 }

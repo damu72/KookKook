@@ -62,10 +62,10 @@ app.get<{ Params: { topicId: string } }>("/capacities/:topicId", async (req, rep
 });
 
 // --- POST /seat-reservations ----------------------------------------------
-app.post<{ Body: { topicId?: string; userId?: string } }>(
+app.post<{ Body: { topicId?: string; userId?: string; idempotencyKey?: string } }>(
   "/seat-reservations",
   async (req, reply) => {
-    const { topicId, userId } = req.body ?? {};
+    const { topicId, userId, idempotencyKey } = req.body ?? {};
     if (!topicId || !userId) {
       return reply.code(400).send({ error: "topicId and userId are required" });
     }
@@ -73,7 +73,7 @@ app.post<{ Body: { topicId?: string; userId?: string } }>(
       return reply.code(400).send({ error: `unknown user: ${userId}` });
     }
     try {
-      const reservation = await repo.reserveSeat(topicId, userId);
+      const reservation = await repo.reserveSeat(topicId, userId, idempotencyKey);
       return reply.code(201).send(reservation);
     } catch (err) {
       if (err instanceof CapacityNotFoundError) {

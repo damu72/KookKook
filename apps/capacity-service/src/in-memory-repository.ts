@@ -57,11 +57,24 @@ export class InMemoryCapacityRepository implements CapacityRepository {
     return this.toView(cap);
   }
 
-  async reserveSeat(topicId: string, userId: string): Promise<SeatReservation> {
+  async reserveSeat(
+    topicId: string,
+    userId: string,
+    idempotencyKey?: string,
+  ): Promise<SeatReservation> {
     // Kritischer Abschnitt pro Topic – atomar gegen andere reserve/release.
     return this.mutex.runExclusive(topicId, () => {
       const cap = this.capacities.get(topicId);
       if (!cap) throw new CapacityNotFoundError(topicId);
+
+      // Idempotenz: gibt es zum Schlüssel bereits eine aktive Reservierung,
+      // wird sie zurückgegeben (kein zweiter Platz wird belegt).
+      if (idempotencyKey) {
+        for (const r of this.reservations.values()) {
+          if (r.idempotencyKey === idempotencyKey && r.status === "active") return r;
+        }
+      }
+
       if (this.countActive(topicId) >= cap.maxGuests) {
         throw new CapacityFullError(topicId);
       }
@@ -70,6 +83,7 @@ export class InMemoryCapacityRepository implements CapacityRepository {
         topicId,
         userId,
         status: "active",
+        idempotencyKey: idempotencyKey ?? null,
         createdAt: new Date().toISOString(),
         releasedAt: null,
       };

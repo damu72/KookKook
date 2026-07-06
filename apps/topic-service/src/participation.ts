@@ -3,18 +3,18 @@
 const PARTICIPATION_SERVICE_URL =
   process.env.PARTICIPATION_SERVICE_URL ?? "http://127.0.0.1:3002";
 
-interface ParticipationRecord {
+interface ParticipationRequest {
   id: string;
   topicId: string;
-  userId: string;
+  guestUserId: string;
   status: string;
 }
 
 /**
- * "Akzeptierter Teilnehmer" = im Participation Service als `joined` geführt.
- * (waitlist/cancelled zählen nicht.)
+ * "Akzeptierter Teilnehmer" = Teilnahme-Anfrage im Status ACCEPTED.
+ * (REQUESTED/DECLINED/CANCELLED zählen nicht.)
  */
-const ACCEPTED_STATUS = "joined";
+const ACCEPTED_STATUS = "ACCEPTED";
 
 /**
  * Fragt den Participation Service (HTTP, MVP) danach, ob `userId` ein
@@ -27,14 +27,14 @@ export async function isAcceptedParticipant(
   topicId: string,
   userId: string,
 ): Promise<boolean> {
-  const url = `${PARTICIPATION_SERVICE_URL}/participations?topicId=${encodeURIComponent(
+  const url = `${PARTICIPATION_SERVICE_URL}/topics/${encodeURIComponent(
     topicId,
-  )}&userId=${encodeURIComponent(userId)}`;
+  )}/participation-requests`;
 
   const res = await fetch(url);
   if (!res.ok) {
     throw new Error(`participation-service responded ${res.status} ${res.statusText}`);
   }
-  const records = (await res.json()) as ParticipationRecord[];
-  return records.some((p) => p.status === ACCEPTED_STATUS);
+  const requests = (await res.json()) as ParticipationRequest[];
+  return requests.some((r) => r.guestUserId === userId && r.status === ACCEPTED_STATUS);
 }
