@@ -1,87 +1,108 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
-import { makeHealth } from "@kookkook/shared";
+import { isKnownUser, makeHealth } from "@kookkook/shared";
+import {
+  CapacityExistsError,
+  CapacityFullError,
+  CapacityNotFoundError,
+  CapacityRepository,
+  ReservationNotFoundError,
+} from "./domain.js";
+import { InMemoryCapacityRepository } from "./in-memory-repository.js";
 
 const SERVICE_NAME = "capacity-service";
 const PORT = Number(process.env.PORT ?? 3003);
 
-interface Capacity {
-  topicId: string;
-  maxSeats: number;
-  reservedSeats: number;
-}
+// Austauschbar: hier später z.B. ein PostgresCapacityRepository einsetzen.
+const repo: CapacityRepository = new InMemoryCapacityRepository();
 
-// --- In-memory store -------------------------------------------------------
-const capacities = new Map<string, Capacity>();
+// Demo-Kapazitäten passend zu den Topic-Service-Seeds (1,2,3).
+await (repo as InMemoryCapacityRepository).seed([
+  { topicId: "1", maxGuests: 6 },
+  { topicId: "2", maxGuests: 4 },
+  { topicId: "3", maxGuests: 8 },
+]);
 
-function seed() {
-  const seeds: Capacity[] = [
-    { topicId: "1", maxSeats: 6, reservedSeats: 2 },
-    { topicId: "2", maxSeats: 4, reservedSeats: 1 },
-    { topicId: "3", maxSeats: 8, reservedSeats: 0 },
-  ];
-  for (const c of seeds) capacities.set(c.topicId, c);
-}
-seed();
-
-function withAvailable(c: Capacity) {
-  return { ...c, availableSeats: Math.max(0, c.maxSeats - c.reservedSeats) };
-}
-
-// --- Server ----------------------------------------------------------------
 const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
 
 app.get("/health", async () => makeHealth(SERVICE_NAME));
 
-app.get("/capacities", async () => Array.from(capacities.values()).map(withAvailable));
+// --- POST /capacities ------------------------------------------------------
+app.post<{ Body: { topicId?: string; maxGuests?: number } }>(
+  "/capacities",
+  async (req, reply) => {
+    const { topicId, maxGuests } = req.body ?? {};
+    if (!topicId) return reply.code(400).send({ error: "topicId is required" });
+    if (typeof maxGuests !== "number" || !Number.isInteger(maxGuests) || maxGuests < 0) {
+      return reply.code(400).send({ error: "maxGuests must be a non-negative integer" });
+    }
+    try {
+      const view = await repo.createCapacity(topicId, maxGuests);
+      return reply.code(201).send(view);
+    } catch (err) {
+      if (err instanceof CapacityExistsError) {
+        return reply.code(409).send({ error: err.message });
+      }
+      throw err;
+    }
+  },
+);
 
+// --- GET /capacities/:topicId ---------------------------------------------
 app.get<{ Params: { topicId: string } }>("/capacities/:topicId", async (req, reply) => {
-  const c = capacities.get(req.params.topicId);
-  if (!c) return reply.code(404).send({ error: "capacity not found" });
-  return withAvailable(c);
+  try {
+    return await repo.getCapacity(req.params.topicId);
+  } catch (err) {
+    if (err instanceof CapacityNotFoundError) {
+      return reply.code(404).send({ error: err.message });
+    }
+    throw err;
+  }
 });
 
-app.put<{ Params: { topicId: string }; Body: { maxSeats?: number } }>(
-  "/capacities/:topicId",
+// --- POST /seat-reservations ----------------------------------------------
+app.post<{ Body: { topicId?: string; userId?: string } }>(
+  "/seat-reservations",
   async (req, reply) => {
-    const { maxSeats } = req.body ?? {};
-    if (typeof maxSeats !== "number" || maxSeats < 0) {
-      return reply.code(400).send({ error: "maxSeats must be a non-negative number" });
+    const { topicId, userId } = req.body ?? {};
+    if (!topicId || !userId) {
+      return reply.code(400).send({ error: "topicId and userId are required" });
     }
-    const existing = capacities.get(req.params.topicId);
-    const updated: Capacity = {
-      topicId: req.params.topicId,
-      maxSeats,
-      reservedSeats: existing?.reservedSeats ?? 0,
-    };
-    capacities.set(req.params.topicId, updated);
-    return withAvailable(updated);
+    if (!isKnownUser(userId)) {
+      return reply.code(400).send({ error: `unknown user: ${userId}` });
+    }
+    try {
+      const reservation = await repo.reserveSeat(topicId, userId);
+      return reply.code(201).send(reservation);
+    } catch (err) {
+      if (err instanceof CapacityNotFoundError) {
+        return reply.code(404).send({ error: err.message });
+      }
+      if (err instanceof CapacityFullError) {
+        return reply.code(409).send({ error: err.message });
+      }
+      throw err;
+    }
   },
 );
 
-// Reserve or release seats: delta may be positive (reserve) or negative (release).
-app.post<{ Params: { topicId: string }; Body: { delta?: number } }>(
-  "/capacities/:topicId/reserve",
+// --- POST /seat-reservations/:reservationId/release ------------------------
+app.post<{ Params: { reservationId: string } }>(
+  "/seat-reservations/:reservationId/release",
   async (req, reply) => {
-    const delta = req.body?.delta ?? 1;
-    const c = capacities.get(req.params.topicId);
-    if (!c) return reply.code(404).send({ error: "capacity not found" });
-    const reserved = c.reservedSeats + delta;
-    if (reserved < 0) {
-      return reply.code(400).send({ error: "cannot release more than reserved" });
+    try {
+      return await repo.releaseReservation(req.params.reservationId);
+    } catch (err) {
+      if (err instanceof ReservationNotFoundError) {
+        return reply.code(404).send({ error: err.message });
+      }
+      throw err;
     }
-    if (reserved > c.maxSeats) {
-      return reply.code(409).send({ error: "not enough capacity" });
-    }
-    c.reservedSeats = reserved;
-    return withAvailable(c);
   },
 );
 
-app
-  .listen({ port: PORT, host: "0.0.0.0" })
-  .catch((err) => {
-    app.log.error(err);
-    process.exit(1);
-  });
+app.listen({ port: PORT, host: "0.0.0.0" }).catch((err) => {
+  app.log.error(err);
+  process.exit(1);
+});

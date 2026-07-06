@@ -94,10 +94,23 @@ Ein Topic hat: `id`, `hostUserId`, `title`, `description`, `cuisine`,
 - `DELETE /participations/:id`
 
 ### capacity-service (3003)
+
+Verwaltet pro Topic eine Kapazität (`maxGuests`) und die Sitzplatz-Reservierungen.
+
 - `GET /health`
-- `GET /capacities` · `GET /capacities/:topicId`
-- `PUT /capacities/:topicId` – `{ maxSeats }`
-- `POST /capacities/:topicId/reserve` – `{ delta }` (positiv = reservieren, negativ = freigeben)
+- `POST /capacities` – `{ topicId, maxGuests }` (409 wenn bereits vorhanden)
+- `GET /capacities/:topicId` – `{ topicId, maxGuests, reservedSeats, availableSeats }` (404 wenn nicht definiert)
+- `POST /seat-reservations` – `{ topicId, userId }` → legt eine Reservierung an.
+  `409`, wenn keine Plätze mehr frei sind; `404`, wenn keine Kapazität definiert ist.
+- `POST /seat-reservations/:reservationId/release` – gibt eine Reservierung frei (idempotent).
+
+**Invariante:** aktive Reservierungen ≤ `maxGuests` – auch bei gleichzeitigen
+Requests. Die Logik hängt nur vom Port `CapacityRepository` ab
+([domain.ts](apps/capacity-service/src/domain.ts)); die aktuelle
+In-Memory-Implementierung serialisiert den kritischen Abschnitt
+(„Plätze zählen → prüfen → anlegen") pro Topic über einen `KeyedMutex`.
+Später kann ein Postgres-Repository denselben Port erfüllen (Transaktion mit
+`SELECT … FOR UPDATE` bzw. Bedingung), ohne Server-/Routen-Code zu ändern.
 
 ### trust-service (3004)
 - `GET /health`
