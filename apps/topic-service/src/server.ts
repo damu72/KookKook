@@ -1,37 +1,26 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import { DEMO_USERS, isKnownUser, makeHealth } from "@kookkook/shared";
+import {
+  CreateTopicInput,
+  TopicStatus,
+  ViewerContext,
+  allTopics,
+  createTopic,
+  getTopic,
+  seed,
+  toPrivateTopicView,
+  toPublicTopic,
+} from "./topics.js";
+import { isAcceptedParticipant } from "./participation.js";
 
 const SERVICE_NAME = "topic-service";
 const PORT = Number(process.env.PORT ?? 3001);
 
-interface Topic {
-  id: string;
-  title: string;
-  description: string;
-  createdBy: string;
-  createdAt: string;
-}
+const VALID_STATUS: TopicStatus[] = ["draft", "published", "full", "cancelled"];
 
-// --- In-memory store -------------------------------------------------------
-const topics = new Map<string, Topic>();
-let nextId = 1;
-
-function seed() {
-  const now = new Date().toISOString();
-  const seeds: Array<Omit<Topic, "id" | "createdAt">> = [
-    { title: "Pasta-Abend", description: "Wir kochen frische Pasta zusammen.", createdBy: "anna" },
-    { title: "Sushi-Workshop", description: "Maki und Nigiri rollen lernen.", createdBy: "ben" },
-    { title: "Veganer Brunch", description: "Gemütlicher Brunch, alles pflanzlich.", createdBy: "clara" },
-  ];
-  for (const s of seeds) {
-    const id = String(nextId++);
-    topics.set(id, { id, createdAt: now, ...s });
-  }
-}
 seed();
 
-// --- Server ----------------------------------------------------------------
 const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
 
@@ -39,40 +28,109 @@ app.get("/health", async () => makeHealth(SERVICE_NAME));
 
 app.get("/users", async () => DEMO_USERS);
 
-app.get("/topics", async () => Array.from(topics.values()));
+// --- POST /topics ----------------------------------------------------------
+interface CreateTopicBody {
+  hostUserId?: string;
+  title?: string;
+  description?: string;
+  cuisine?: string;
+  startsAt?: string;
+  maxGuests?: number;
+  publicLocationLabel?: string;
+  privateAddress?: string;
+  hostArrivalNote?: string;
+  status?: string;
+}
 
-app.get<{ Params: { id: string } }>("/topics/:id", async (req, reply) => {
-  const topic = topics.get(req.params.id);
-  if (!topic) return reply.code(404).send({ error: "topic not found" });
-  return topic;
+app.post<{ Body: CreateTopicBody }>("/topics", async (req, reply) => {
+  const body = req.body ?? {};
+  const { hostUserId, title } = body;
+
+  if (!hostUserId || !title) {
+    return reply.code(400).send({ error: "hostUserId and title are required" });
+  }
+  if (!isKnownUser(hostUserId)) {
+    return reply.code(400).send({ error: `unknown user: ${hostUserId}` });
+  }
+  if (body.maxGuests !== undefined && (typeof body.maxGuests !== "number" || body.maxGuests < 0)) {
+    return reply.code(400).send({ error: "maxGuests must be a non-negative number" });
+  }
+  if (body.status !== undefined && !VALID_STATUS.includes(body.status as TopicStatus)) {
+    return reply.code(400).send({ error: `invalid status: ${body.status}` });
+  }
+
+  const input: CreateTopicInput = {
+    hostUserId,
+    title,
+    description: body.description,
+    cuisine: body.cuisine,
+    startsAt: body.startsAt,
+    maxGuests: body.maxGuests,
+    publicLocationLabel: body.publicLocationLabel,
+    privateAddress: body.privateAddress,
+    hostArrivalNote: body.hostArrivalNote,
+    status: body.status as TopicStatus | undefined,
+  };
+
+  const topic = createTopic(input);
+  // Antwort ist die öffentliche Sicht – der Host bekommt die privaten Details
+  // gezielt über /topics/:id/private-view.
+  return reply.code(201).send(toPublicTopic(topic));
 });
 
-app.post<{ Body: { title?: string; description?: string; createdBy?: string } }>(
-  "/topics",
+// --- GET /topics -----------------------------------------------------------
+// Niemals privateAddress / hostArrivalNote.
+app.get("/topics", async () => allTopics().map(toPublicTopic));
+
+// --- GET /topics/:topicId --------------------------------------------------
+// Niemals privateAddress / hostArrivalNote.
+app.get<{ Params: { topicId: string } }>("/topics/:topicId", async (req, reply) => {
+  const topic = getTopic(req.params.topicId);
+  if (!topic) return reply.code(404).send({ error: "topic not found" });
+  return toPublicTopic(topic);
+});
+
+// --- GET /topics/:topicId/private-view?viewerUserId=... ---------------------
+// privateAddress/hostArrivalNote nur, wenn der Viewer Host ODER akzeptierter
+// Teilnehmer ist. Die Teilnehmer-Prüfung läuft (MVP) per HTTP zum
+// Participation Service.
+app.get<{ Params: { topicId: string }; Querystring: { viewerUserId?: string } }>(
+  "/topics/:topicId/private-view",
   async (req, reply) => {
-    const { title, description, createdBy } = req.body ?? {};
-    if (!title || !createdBy) {
-      return reply.code(400).send({ error: "title and createdBy are required" });
+    const topic = getTopic(req.params.topicId);
+    if (!topic) return reply.code(404).send({ error: "topic not found" });
+
+    const viewerUserId = req.query.viewerUserId;
+    if (!viewerUserId) {
+      return reply.code(400).send({ error: "viewerUserId query parameter is required" });
     }
-    if (!isKnownUser(createdBy)) {
-      return reply.code(400).send({ error: `unknown user: ${createdBy}` });
+
+    const isHost = topic.hostUserId === viewerUserId;
+
+    let isAccepted = false;
+    if (!isHost) {
+      try {
+        isAccepted = await isAcceptedParticipant(topic.id, viewerUserId);
+      } catch (err) {
+        // Fail closed: kann der Teilnahme-Status nicht bestätigt werden,
+        // werden KEINE privaten Details ausgeliefert.
+        req.log.warn({ err }, "participation check failed – hiding private details");
+        isAccepted = false;
+      }
     }
-    const id = String(nextId++);
-    const topic: Topic = {
-      id,
-      title,
-      description: description ?? "",
-      createdBy,
-      createdAt: new Date().toISOString(),
+
+    const viewer: ViewerContext = {
+      userId: viewerUserId,
+      isHost,
+      isAcceptedParticipant: isAccepted,
+      canSeePrivateDetails: isHost || isAccepted,
     };
-    topics.set(id, topic);
-    return reply.code(201).send(topic);
+
+    return toPrivateTopicView(topic, viewer);
   },
 );
 
-app
-  .listen({ port: PORT, host: "0.0.0.0" })
-  .catch((err) => {
-    app.log.error(err);
-    process.exit(1);
-  });
+app.listen({ port: PORT, host: "0.0.0.0" }).catch((err) => {
+  app.log.error(err);
+  process.exit(1);
+});
